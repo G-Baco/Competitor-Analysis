@@ -327,8 +327,9 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
 
     ws.merge_cells("A2:L2")
     ws["A2"] = (
-        "vs. Median: negative ($) = we are cheaper (green = competitive), positive = we are more expensive (red = exposure).  "
-        "Rank 1 = cheapest in market.  Z-Score = SDs from market mean (green = below mean, red = above).  "
+        "vs. Median: positive ($) = we are MORE expensive than market (green = strong pricing / doing well).  "
+        "Negative = we are cheaper than market (red = underpriced / room to push rates).  "
+        "Rank 1 = cheapest in market.  Z-Score: green = above market mean, red = below.  "
         "Blank row = we don't offer that size."
     )
     ws["A2"].font = Font(italic=True, color="666666", size=9)
@@ -418,15 +419,15 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
             c = ws.cell(row=row, column=col_idx, value=val)
             c.alignment = CENTER
 
-        # vs. Median, Rank, Position: color by vs. median sign
+        # vs. Median, Rank, Position: green = we're more expensive (doing well), red = cheaper (underpriced)
         if vs_median_dollar is not None:
-            med_fill = GREEN_FILL if vs_median_dollar <= 0 else RED_FILL
+            med_fill = GREEN_FILL if vs_median_dollar >= 0 else RED_FILL
             for col in (7, 8, 9, 12):
                 ws.cell(row=row, column=col).fill = med_fill
 
-        # Z-score: independent coloring
+        # Z-score: green = above mean (strong), red = below mean (weak)
         if z_score is not None:
-            ws.cell(row=row, column=11).fill = GREEN_FILL if z_score <= 0 else RED_FILL
+            ws.cell(row=row, column=11).fill = GREEN_FILL if z_score >= 0 else RED_FILL
 
         if vs_median_pct is not None:
             ws.cell(row=row, column=8).value = f"{vs_median_pct:+.1f}%"
@@ -462,8 +463,8 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
     ws.merge_cells(f"A2:{get_column_letter(2 + len(SUMMARY_SIZES))}2")
     ws["A2"] = (
         "Rates shown are cheapest in-store rate for any unit of that size.  "
-        "Green cell = competitor is cheaper than us for that size.  "
-        "Red cell = competitor is more expensive."
+        "Green cell = competitor is MORE expensive than us (we have room to push rates).  "
+        "Red cell = competitor is cheaper (they are undercutting us)."
     )
     ws["A2"].font = Font(italic=True, color="666666", size=9)
     ws.row_dimensions[2].height = 14
@@ -521,7 +522,7 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
             elif price is not None:
                 our_rt = our_rates.get(norm)
                 if our_rt:
-                    c.fill = CHEAPER_FILL if price < our_rt else PRICIER_FILL
+                    c.fill = GREEN_FILL if price > our_rt else RED_FILL
 
     # Market median row
     last_data = data_start + len(ordered) - 1
@@ -732,7 +733,8 @@ def write_facility_sheet(wb, s, our_rates, today, used_names):
                 c.alignment = CENTER
 
         if not is_ours and vs_our is not None:
-            fill = CHEAPER_FILL if vs_our < 0 else PRICIER_FILL
+            # vs_our = their rate - our rate: positive = they charge more = green (good for us)
+            fill = GREEN_FILL if vs_our > 0 else RED_FILL
             for col in range(len(vals) - 1, len(vals) + 1):
                 ws.cell(row=row, column=col).fill = fill
                 ws.cell(row=row, column=col).alignment = CENTER

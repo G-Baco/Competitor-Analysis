@@ -42,6 +42,7 @@ CHEAPER_FILL  = PatternFill("solid", fgColor="E2EFDA")   # green — they're che
 PRICIER_FILL  = PatternFill("solid", fgColor="FCE4D6")   # red — they're more expensive
 GREEN_FILL    = PatternFill("solid", fgColor="C6EFCE")   # strong green — we're winning
 RED_FILL      = PatternFill("solid", fgColor="FFC7CE")   # strong red — we're exposed
+PROMO_FILL    = PatternFill("solid", fgColor="FFE699")   # amber — promo-aggressive competitor
 
 WHITE_FONT    = Font(color="FFFFFF", bold=True)
 BOLD_FONT     = Font(bold=True)
@@ -309,34 +310,46 @@ def get_our_rates(our_scraped):
                 rates[size] = rate
     return rates
 
+def get_our_eff_yearly_rates(our_scraped):
+    """Returns {size_norm: cheapest effective_yearly} for our property."""
+    rates = {}
+    if not our_scraped:
+        return rates
+    for u in our_scraped["units"]:
+        size = u.get("size_norm")
+        eff  = u.get("effective_yearly")
+        if size and eff:
+            if size not in rates or eff < rates[size]:
+                rates[size] = eff
+    return rates
+
 
 # ── Sheet: Our Position ───────────────────────────────────────────────────────
 
-def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
+def write_our_position_sheet(wb, scraped, our_rates, our_eff_yearly_rates, market_name, today):
     """
     Executive summary — your rates vs. the market for every unit size.
-    One row per size: Your Rate | # Cheaper | Market Min | Market Median | Market Max | Rank | vs. Median
+    Cols 1-12: street rate analysis. Cols 13-15: effective yearly analysis.
     """
     ws = wb.create_sheet("Our Position")
 
-    ws.merge_cells("A1:I1")
+    ws.merge_cells("A1:O1")
     ws["A1"] = f"Our Competitive Position  —  {market_name}  |  {today}"
     ws["A1"].font = Font(bold=True, size=13, color="1F3864")
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 24
 
-    ws.merge_cells("A2:L2")
+    ws.merge_cells("A2:O2")
     ws["A2"] = (
         "vs. Median: positive ($) = we are MORE expensive than market (green = strong pricing / doing well).  "
-        "Negative = we are cheaper than market (red = underpriced / room to push rates).  "
-        "Rank 1 = cheapest in market.  Z-Score: green = above market mean, red = below.  "
+        "Negative = cheaper than market (red = underpriced).  Rank 1 = cheapest.  "
+        "Z-Score: green = above market mean, red = below.  "
+        "Eff. Yearly adjusts for promos — green = our eff. yearly > market median eff. yearly.  "
         "Blank row = we don't offer that size."
     )
     ws["A2"].font = Font(italic=True, color="666666", size=9)
     ws.row_dimensions[2].height = 16
 
-    # Col layout: Size | Sqft | Our Rate | Our $/sqft | Mkt Median | Mkt Median $/sqft |
-    #             vs. Median ($) | vs. Median (%) | Rank (1=cheapest) | Mkt Std Dev | Z-Score | Position
     headers = [
         "Unit Size", "Sqft",
         "Our Rate", "Our $/sqft",
@@ -344,6 +357,7 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
         "vs. Median ($)\n− = we're cheaper", "vs. Median (%)",
         "Our Rank\n(1 = cheapest)",
         "Mkt Std Dev", "Z-Score", "Position",
+        "Our Eff. Yearly", "Mkt Median\nEff. Yearly", "vs. Eff.\nMedian ($)",
     ]
     _header_row(ws, 3, headers, DARK_FILL, WHITE_FONT)
     ws.row_dimensions[3].height = 40
@@ -366,13 +380,25 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
                         comp_rates.append(r)
                         break  # one (cheapest) per facility
 
+        comp_eff_yearly = []
+        for s in competitors:
+            for u in s["units"]:
+                if u.get("size_norm") == norm and u.get("unit_type") != "Vehicle":
+                    ey = u.get("effective_yearly")
+                    if ey:
+                        comp_eff_yearly.append(ey)
+                        break
+
         if not our_rate and not comp_rates:
             continue
 
-        mkt_median  = round(statistics.median(comp_rates), 2)           if comp_rates else None
-        mkt_avg     = round(sum(comp_rates) / len(comp_rates), 2)       if comp_rates else None
-        mkt_stdev   = round(statistics.stdev(comp_rates), 2)            if len(comp_rates) >= 2 else None
-        mkt_med_psf = round(mkt_median / sf, 2)                         if mkt_median and sf else None
+        mkt_median     = round(statistics.median(comp_rates), 2)         if comp_rates else None
+        mkt_avg        = round(sum(comp_rates) / len(comp_rates), 2)     if comp_rates else None
+        mkt_stdev      = round(statistics.stdev(comp_rates), 2)          if len(comp_rates) >= 2 else None
+        mkt_med_psf    = round(mkt_median / sf, 2)                       if mkt_median and sf else None
+        mkt_median_eff = round(statistics.median(comp_eff_yearly), 2)    if comp_eff_yearly else None
+        our_eff_yearly = our_eff_yearly_rates.get(norm)
+        vs_eff_median  = round(our_eff_yearly - mkt_median_eff, 2)       if our_eff_yearly and mkt_median_eff else None
 
         rank_str         = None
         vs_median_dollar = None
@@ -413,6 +439,7 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
             vs_median_dollar, vs_median_pct,
             rank_str,
             mkt_stdev, z_score, position_str,
+            our_eff_yearly, mkt_median_eff, vs_eff_median,
         ]
 
         for col_idx, val in enumerate(vals, 1):
@@ -432,6 +459,10 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
         if vs_median_pct is not None:
             ws.cell(row=row, column=8).value = f"{vs_median_pct:+.1f}%"
 
+        # Eff. Yearly vs. median: same green/red convention
+        if vs_eff_median is not None:
+            ws.cell(row=row, column=15).fill = GREEN_FILL if vs_eff_median >= 0 else RED_FILL
+
         row += 1
 
     _autofit(ws)
@@ -440,31 +471,36 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
     ws.column_dimensions["E"].width = 11
     ws.column_dimensions["G"].width = 18
     ws.column_dimensions["L"].width = 32
+    ws.column_dimensions["M"].width = 13
+    ws.column_dimensions["N"].width = 16
+    ws.column_dimensions["O"].width = 16
 
 
 # ── Sheet: Summary ────────────────────────────────────────────────────────────
 
-def write_summary_sheet(wb, scraped, our_rates, market_name, today):
+def write_summary_sheet(wb, scraped, our_rates, our_eff_yearly_rates, market_name, today):
     """
-    Matrix of cheapest rate per facility × unit size.
-    Our property row is pinned at top in navy.
-    Competitor cells are color-coded: green = cheaper than us, red = more expensive.
+    Matrix 1: cheapest street rate per facility × unit size.
+    Matrix 2 (below): effective yearly rate per facility × unit size.
+    Amber cells in matrix 2 = competitor is promo-aggressive (eff. yearly >10% below street rate).
     """
     ws = wb.create_sheet("Summary")
     ws.freeze_panes = "C4"
 
-    ws.merge_cells(f"A1:{get_column_letter(2 + len(SUMMARY_SIZES))}1")
+    last_col = get_column_letter(3 + len(SUMMARY_SIZES))
+
+    ws.merge_cells(f"A1:{last_col}1")
     ws["A1"] = f"{market_name}  —  Competitor Rate Summary  |  {today}"
     ws["A1"].font = Font(bold=True, size=13, color="1F3864")
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 24
 
-    # Legend row
-    ws.merge_cells(f"A2:{get_column_letter(2 + len(SUMMARY_SIZES))}2")
+    ws.merge_cells(f"A2:{last_col}2")
     ws["A2"] = (
         "Rates shown are cheapest in-store rate for any unit of that size.  "
-        "Green cell = competitor is MORE expensive than us (we have room to push rates).  "
-        "Red cell = competitor is cheaper (they are undercutting us)."
+        "Green cell = competitor is MORE expensive than us (we have pricing power).  "
+        "Red cell = competitor is cheaper (undercutting us).  "
+        "See Effective Yearly matrix below for promo-adjusted pricing."
     )
     ws["A2"].font = Font(italic=True, color="666666", size=9)
     ws.row_dimensions[2].height = 14
@@ -472,9 +508,8 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
     _header_row(ws, 3, ["Facility", "Distance (mi)", "Website"] + SUMMARY_SIZES, DARK_FILL, WHITE_FONT)
     ws.row_dimensions[3].height = 28
 
-    # Sort: our property first, then competitors by distance
-    ours   = [s for s in scraped if s["is_ours"]]
-    others = [s for s in scraped if not s["is_ours"]]
+    ours    = [s for s in scraped if s["is_ours"]]
+    others  = [s for s in scraped if not s["is_ours"]]
     ordered = ours + others
 
     data_start = 4
@@ -497,7 +532,7 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
             for col in range(1, 4 + len(SUMMARY_SIZES)):
                 c = ws.cell(row=row_idx, column=col)
                 c.fill = OUR_FILL
-                if col != 3:  # URL cell font already set above
+                if col != 3:
                     c.font = WHITE_FONT
         else:
             name_cell.font = BOLD_FONT
@@ -524,10 +559,10 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
                 if our_rt:
                     c.fill = GREEN_FILL if price > our_rt else RED_FILL
 
-    # Market median row
-    last_data = data_start + len(ordered) - 1
+    # Street rate market median row
+    last_data  = data_start + len(ordered) - 1
     median_row = last_data + 2
-    med_label = ws.cell(row=median_row, column=1, value="MARKET MEDIAN")
+    med_label  = ws.cell(row=median_row, column=1, value="MARKET MEDIAN")
     med_label.font = Font(bold=True, italic=True)
     med_label.fill = MEDIAN_FILL
 
@@ -535,7 +570,7 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
     for col_idx in range(4, 4 + len(SUMMARY_SIZES)):
         col_letter = get_column_letter(col_idx)
         if comp_rows:
-            addrs = ",".join(f"{col_letter}{r}" for r in comp_rows)
+            addrs   = ",".join(f"{col_letter}{r}" for r in comp_rows)
             formula = f"=IFERROR(MEDIAN({addrs}),\"\")"
         else:
             formula = ""
@@ -546,6 +581,113 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
 
     ws.cell(row=median_row, column=2).fill = MEDIAN_FILL
     ws.cell(row=median_row, column=3).fill = MEDIAN_FILL
+
+    # ── Second matrix: Effective Yearly Rates ─────────────────────────────────
+    eff_title_row  = median_row + 2
+    eff_legend_row = eff_title_row + 1
+    eff_hdr_row    = eff_legend_row + 1
+    eff_data_start = eff_hdr_row + 1
+
+    ws.merge_cells(f"A{eff_title_row}:{last_col}{eff_title_row}")
+    ws[f"A{eff_title_row}"] = (
+        "EFFECTIVE YEARLY RATES  —  adjusted for promos, admin fees & lock fees"
+    )
+    ws[f"A{eff_title_row}"].font  = Font(bold=True, size=11, color="FFFFFF")
+    ws[f"A{eff_title_row}"].fill  = ACCENT_FILL
+    ws[f"A{eff_title_row}"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[eff_title_row].height = 22
+
+    ws.merge_cells(f"A{eff_legend_row}:{last_col}{eff_legend_row}")
+    ws[f"A{eff_legend_row}"] = (
+        "Effective Yearly = ((Rate × 12) − promo savings + admin fee + lock fee) ÷ 12.  "
+        "Green = competitor's eff. yearly > ours (pricier even after promos).  "
+        "Red = cheaper than us after promos.  "
+        "Amber = promo-aggressive: eff. yearly >10% below their own street rate — may signal occupancy pressure."
+    )
+    ws[f"A{eff_legend_row}"].font = Font(italic=True, color="666666", size=9)
+    ws.row_dimensions[eff_legend_row].height = 14
+
+    _header_row(ws, eff_hdr_row, ["Facility", "Distance (mi)", "Website"] + SUMMARY_SIZES,
+                DARK_FILL, WHITE_FONT)
+    ws.row_dimensions[eff_hdr_row].height = 28
+
+    for row_idx, s in enumerate(ordered, eff_data_start):
+        is_ours = s["is_ours"]
+        units   = s["units"]
+
+        dist_raw  = s["facility"].get("distance")
+        dist_num  = round(dist_raw, 4) if dist_raw and dist_raw < 9999 else None
+        url = s["facility"].get("url", "") or ""
+
+        name_cell = ws.cell(row=row_idx, column=1, value=s["display_name"])
+        ws.cell(row=row_idx, column=2, value=0.0 if is_ours else dist_num)
+        url_cell  = ws.cell(row=row_idx, column=3, value=url)
+        if url:
+            url_cell.hyperlink = url
+            url_cell.font = Font(color="FFFFFF" if is_ours else "0563C1", underline="single",
+                                 bold=is_ours)
+
+        if is_ours:
+            for col in range(1, 4 + len(SUMMARY_SIZES)):
+                c = ws.cell(row=row_idx, column=col)
+                c.fill = OUR_FILL
+                if col != 3:
+                    c.font = WHITE_FONT
+        else:
+            name_cell.font = BOLD_FONT
+
+        for col_idx, size in enumerate(SUMMARY_SIZES, 4):
+            norm     = normalize_size(size)
+            matching = [u for u in units
+                        if u.get("size_norm") == norm and u.get("unit_type") != "Vehicle"]
+
+            eff_yearly  = None
+            street_rate = None
+            if matching:
+                effs = [u["effective_yearly"] for u in matching if u.get("effective_yearly")]
+                eff_yearly = round(min(effs), 2) if effs else None
+                in_store = [u["in_store_rate"] for u in matching if u.get("in_store_rate")]
+                web      = [u["web_rate"]      for u in matching if u.get("web_rate")]
+                prices   = in_store or web
+                street_rate = round(min(prices), 2) if prices else None
+
+            c = ws.cell(row=row_idx, column=col_idx, value=eff_yearly)
+            c.alignment = CENTER
+
+            if is_ours:
+                c.fill = OUR_FILL
+                c.font = WHITE_FONT
+            elif eff_yearly is not None:
+                # Amber = promo-aggressive (eff. yearly >10% below their own street rate)
+                if street_rate and eff_yearly < street_rate * 0.90:
+                    c.fill = PROMO_FILL
+                else:
+                    our_ey = our_eff_yearly_rates.get(norm)
+                    if our_ey:
+                        c.fill = GREEN_FILL if eff_yearly > our_ey else RED_FILL
+
+    # Effective yearly market median row
+    eff_last_data  = eff_data_start + len(ordered) - 1
+    eff_median_row = eff_last_data + 2
+    med2_label     = ws.cell(row=eff_median_row, column=1, value="MARKET MEDIAN (EFF. YEARLY)")
+    med2_label.font = Font(bold=True, italic=True)
+    med2_label.fill = MEDIAN_FILL
+
+    eff_comp_rows = [eff_data_start + i for i, s in enumerate(ordered) if not s["is_ours"]]
+    for col_idx in range(4, 4 + len(SUMMARY_SIZES)):
+        col_letter = get_column_letter(col_idx)
+        if eff_comp_rows:
+            addrs   = ",".join(f"{col_letter}{r}" for r in eff_comp_rows)
+            formula = f"=IFERROR(MEDIAN({addrs}),\"\")"
+        else:
+            formula = ""
+        c = ws.cell(row=eff_median_row, column=col_idx, value=formula)
+        c.fill = MEDIAN_FILL
+        c.font = Font(bold=True, italic=True)
+        c.alignment = CENTER
+
+    ws.cell(row=eff_median_row, column=2).fill = MEDIAN_FILL
+    ws.cell(row=eff_median_row, column=3).fill = MEDIAN_FILL
 
     _autofit(ws)
     ws.column_dimensions["A"].width = 34
@@ -585,6 +727,49 @@ def write_market_stats_sheet(wb, scraped):
                 round(min(rates), 2),
                 round(max(rates), 2),
                 round(max(rates) - min(rates), 2),
+            ], 1):
+                c = ws.cell(row=row, column=col_idx, value=val)
+                if fill:
+                    c.fill = fill
+            row += 1
+
+    # ── Effective Yearly Rates section ────────────────────────────────────────
+    row += 1  # blank separator row
+
+    ws.merge_cells(f"A{row}:H{row}")
+    ws[f"A{row}"] = "EFFECTIVE YEARLY RATES  —  adjusted for promos, admin fees & lock fees"
+    ws[f"A{row}"].font      = Font(bold=True, color="FFFFFF")
+    ws[f"A{row}"].fill      = ACCENT_FILL
+    ws[f"A{row}"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[row].height = 22
+    row += 1
+
+    _header_row(ws, row, headers, DARK_FILL, WHITE_FONT)
+    ws.row_dimensions[row].height = 25
+    row += 1
+
+    last_size = None
+    for size in SUMMARY_SIZES:
+        norm = normalize_size(size)
+        for utype in UNIT_TYPES:
+            effs = []
+            for s in competitors:
+                for u in s["units"]:
+                    if u.get("size_norm") == norm and u.get("unit_type") == utype:
+                        ey = u.get("effective_yearly")
+                        if ey:
+                            effs.append(ey)
+            if not effs:
+                continue
+            fill = LIGHT_FILL if size != last_size and last_size is not None else None
+            last_size = size
+            for col_idx, val in enumerate([
+                size, utype, len(effs),
+                round(sum(effs) / len(effs), 2),
+                round(statistics.median(effs), 2),
+                round(min(effs), 2),
+                round(max(effs), 2),
+                round(max(effs) - min(effs), 2),
             ], 1):
                 c = ws.cell(row=row, column=col_idx, value=val)
                 if fill:
@@ -758,15 +943,16 @@ def build_report(scraped, out_path, market_name, today):
     wb = Workbook()
     wb.remove(wb.active)
 
-    our_scraped = next((s for s in scraped if s["is_ours"]), None)
-    our_rates   = get_our_rates(our_scraped)
+    our_scraped        = next((s for s in scraped if s["is_ours"]), None)
+    our_rates          = get_our_rates(our_scraped)
+    our_eff_yearly_rates = get_our_eff_yearly_rates(our_scraped)
 
     used_names = set()
 
-    write_our_position_sheet(wb, scraped, our_rates, market_name, today)
+    write_our_position_sheet(wb, scraped, our_rates, our_eff_yearly_rates, market_name, today)
     used_names.add("Our Position")
 
-    write_summary_sheet(wb, scraped, our_rates, market_name, today)
+    write_summary_sheet(wb, scraped, our_rates, our_eff_yearly_rates, market_name, today)
     used_names.add("Summary")
 
     write_market_stats_sheet(wb, scraped)

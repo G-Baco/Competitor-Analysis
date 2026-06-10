@@ -316,11 +316,11 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 24
 
-    ws.merge_cells("A2:I2")
+    ws.merge_cells("A2:M2")
     ws["A2"] = (
-        "Green = we are at or below market average (competitive).  "
-        "Red = we are above average (exposure).  "
-        "Z-Score = standard deviations from the market mean — |Z| > 1 is a meaningful outlier, |Z| > 2 is significant.  "
+        "vs. Median: green = we are cheaper than median (competitive), red = we are more expensive (exposure).  "
+        "Z-Score: green = below market mean, red = above mean.  "
+        "These can differ — median ignores outliers, mean does not.  "
         "Blank = we don't offer that size."
     )
     ws["A2"].font = Font(italic=True, color="666666", size=9)
@@ -378,19 +378,21 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
 
             if mkt_avg and mkt_stdev and mkt_stdev > 0:
                 z_score = round((our_rate - mkt_avg) / mkt_stdev, 2)
-                # Plain-English interpretation
-                az = abs(z_score)
-                direction = "above" if z_score > 0 else "below"
-                if az < 0.5:
-                    position_str = f"At market avg"
-                elif az < 1.0:
-                    position_str = f"Slightly {direction} avg ({z_score:+.2f} SD)"
-                elif az < 1.5:
-                    position_str = f"Moderately {direction} avg ({z_score:+.2f} SD)"
-                elif az < 2.0:
-                    position_str = f"Well {direction} avg ({z_score:+.2f} SD)"
+
+            # Position label: based on % vs median (robust to outliers, intuitive)
+            if vs_median_pct is not None:
+                apct = abs(vs_median_pct)
+                direction = "above" if vs_median_pct > 0 else "below"
+                if apct < 3:
+                    position_str = "At market median"
+                elif apct < 10:
+                    position_str = f"Slightly {direction} median ({vs_median_pct:+.1f}%)"
+                elif apct < 20:
+                    position_str = f"Moderately {direction} median ({vs_median_pct:+.1f}%)"
+                elif apct < 35:
+                    position_str = f"Well {direction} median ({vs_median_pct:+.1f}%)"
                 else:
-                    position_str = f"Significant outlier {direction} ({z_score:+.2f} SD)"
+                    position_str = f"Significantly {direction} median ({vs_median_pct:+.1f}%)"
 
         vals = [
             size, our_rate,
@@ -403,21 +405,20 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
             c = ws.cell(row=row, column=col_idx, value=val)
             c.alignment = CENTER
 
-        # Determine fill based on Z-score if available, else fall back to vs. median
+        # vs. Median columns (9, 10) and Rank (8): color based on vs. median sign
+        #   negative = we're cheaper = green, positive = we're more expensive = red
+        if vs_median_dollar is not None:
+            med_fill = GREEN_FILL if vs_median_dollar <= 0 else RED_FILL
+            for col in (8, 9, 10, 13):  # Rank, vs. Median $, vs. Median %, Position
+                ws.cell(row=row, column=col).fill = med_fill
+
+        # Z-score column (12): colored independently — below mean = green, above = red
         if z_score is not None:
-            fill = GREEN_FILL if z_score <= 0 else RED_FILL
-        elif vs_median_dollar is not None:
-            fill = GREEN_FILL if vs_median_dollar <= 0 else RED_FILL
-        else:
-            fill = None
+            ws.cell(row=row, column=12).fill = GREEN_FILL if z_score <= 0 else RED_FILL
 
-        if fill:
-            for col in (8, 9, 10, 12, 13):   # Rank, vs. Median $, vs. Median %, Z-Score, Position
-                ws.cell(row=row, column=col).fill = fill
-
-        # Format % with sign
+        # Format % with explicit sign
         if vs_median_pct is not None:
-            ws.cell(row=row, column=10).value = f"{'+' if vs_median_pct > 0 else ''}{vs_median_pct}%"
+            ws.cell(row=row, column=10).value = f"{vs_median_pct:+.1f}%"
 
         row += 1
 

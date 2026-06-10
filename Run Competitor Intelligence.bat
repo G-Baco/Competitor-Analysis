@@ -5,24 +5,32 @@ setlocal
 set INSTALL_DIR=%~dp0
 
 echo.
-echo  Running Competitor Intelligence...
+echo  Checking dependencies...
 echo.
 
 where py >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    py "%INSTALL_DIR%\competitor_intelligence.py"
-    goto done
+    set PYTHON=py
+    goto install
 )
 
 where python3 >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    python3 "%INSTALL_DIR%\competitor_intelligence.py"
-    goto done
+    set PYTHON=python3
+    goto install
 )
 
-python "%INSTALL_DIR%\competitor_intelligence.py"
+set PYTHON=python
 
-:done
+:install
+%PYTHON% -m pip install -r "%INSTALL_DIR%\requirements.txt" --quiet
+
+echo.
+echo  Running Competitor Intelligence...
+echo.
+
+%PYTHON% "%INSTALL_DIR%\competitor_intelligence.py"
+
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo  Something went wrong. Screenshot this window and send to the team.

@@ -99,20 +99,27 @@ def _is_locker(unit):
 
 # ── Rate calculations ─────────────────────────────────────────────────────────
 
-def effective_move_in_rate(rate, promo_months, admin_fee=0.0, lock_fee=0.0, insurance_monthly=0.0):
-    """What the tenant pays on move-in day: month-1 rent (after promo) + one-time fees + first insurance."""
+def effective_move_in_rate(rate, promo_months, admin_fee=0.0, lock_fee=0.0):
+    """What the tenant pays on move-in day: month-1 rent (after promo) + admin fee + lock fee."""
     if not rate:
         return None
     month1_rent = rate * max(0.0, 1.0 - min(promo_months or 0.0, 1.0))
-    return round(month1_rent + (admin_fee or 0) + (lock_fee or 0) + (insurance_monthly or 0), 2)
+    return round(month1_rent + (admin_fee or 0) + (lock_fee or 0), 2)
 
-def effective_yearly_rate(rate, promo_months, admin_fee=0.0, lock_fee=0.0, insurance_monthly=0.0):
-    """Total 12-month cost as a monthly equivalent: includes promo savings, fees, and insurance."""
+def effective_yearly_rate(rate, promo_months, admin_fee=0.0, lock_fee=0.0):
+    """Total 12-month cost as a monthly equivalent: ((rate×12) − promo savings + admin + lock) / 12."""
     if not rate:
         return None
     promo_savings = (promo_months or 0.0) * rate
-    total = (rate * 12) - promo_savings + (admin_fee or 0) + (lock_fee or 0) + ((insurance_monthly or 0) * 12)
+    total = (rate * 12) - promo_savings + (admin_fee or 0) + (lock_fee or 0)
     return round(total / 12, 2)
+
+def sqft_from_size(size_norm):
+    """Parse square footage from a normalized size string, e.g. '5x10' → 50."""
+    if not size_norm:
+        return None
+    m = re.match(r"(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)", str(size_norm))
+    return round(float(m.group(1)) * float(m.group(2)), 1) if m else None
 
 
 # ── Yardi import ──────────────────────────────────────────────────────────────
@@ -218,8 +225,10 @@ def enrich_units(units):
         admin = u.get("admin_fee") or 0.0
         lock  = u.get("lock_fee") or 0.0
         ins   = u.get("insurance_monthly") or 0.0
-        u["effective_move_in"] = effective_move_in_rate(rate, promo, admin, lock, ins)
-        u["effective_yearly"]  = effective_yearly_rate(rate, promo, admin, lock, ins)
+        u["effective_move_in"] = effective_move_in_rate(rate, promo, admin, lock)
+        u["effective_yearly"]  = effective_yearly_rate(rate, promo, admin, lock)
+        u["sqft"]              = sqft_from_size(u.get("size_norm"))
+        u["rate_per_sqft"]     = round(rate / u["sqft"], 2) if rate and u["sqft"] else None
     return [u for u in units if not _is_locker(u)]
 
 def scrape_all(facilities):
@@ -316,50 +325,53 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 24
 
-    ws.merge_cells("A2:M2")
+    ws.merge_cells("A2:L2")
     ws["A2"] = (
-        "vs. Median: green = we are cheaper than median (competitive), red = we are more expensive (exposure).  "
-        "Z-Score: green = below market mean, red = above mean.  "
-        "These can differ — median ignores outliers, mean does not.  "
-        "Blank = we don't offer that size."
+        "vs. Median: negative ($) = we are cheaper (green = competitive), positive = we are more expensive (red = exposure).  "
+        "Rank 1 = cheapest in market.  Z-Score = SDs from market mean (green = below mean, red = above).  "
+        "Blank row = we don't offer that size."
     )
     ws["A2"].font = Font(italic=True, color="666666", size=9)
     ws.row_dimensions[2].height = 16
 
+    # Col layout: Size | Sqft | Our Rate | Our $/sqft | Mkt Median | Mkt Median $/sqft |
+    #             vs. Median ($) | vs. Median (%) | Rank (1=cheapest) | Mkt Std Dev | Z-Score | Position
     headers = [
-        "Unit Size", "Our Rate",
-        "# Cheaper\nThan Us", "Market Min", "Market Avg", "Market Median", "Market Max",
-        "Our Rank", "vs. Median ($)", "vs. Median (%)",
+        "Unit Size", "Sqft",
+        "Our Rate", "Our $/sqft",
+        "Mkt Median", "Mkt Median\n$/sqft",
+        "vs. Median ($)\n− = we're cheaper", "vs. Median (%)",
+        "Our Rank\n(1 = cheapest)",
         "Mkt Std Dev", "Z-Score", "Position",
     ]
     _header_row(ws, 3, headers, DARK_FILL, WHITE_FONT)
-    ws.row_dimensions[3].height = 32
+    ws.row_dimensions[3].height = 40
 
     competitors = [s for s in scraped if not s["is_ours"]]
 
     row = 4
     for size in SUMMARY_SIZES:
-        norm = normalize_size(size)
+        norm    = normalize_size(size)
+        sf      = sqft_from_size(norm)
         our_rate = our_rates.get(norm)
+        our_per_sqft = round(our_rate / sf, 2) if our_rate and sf else None
 
         comp_rates = []
         for s in competitors:
             for u in s["units"]:
-                if u.get("size_norm") == norm and u.get("unit_type") not in ("Vehicle",):
+                if u.get("size_norm") == norm and u.get("unit_type") != "Vehicle":
                     r = u.get("in_store_rate") or u.get("web_rate")
                     if r:
                         comp_rates.append(r)
-                        break  # cheapest per facility
+                        break  # one (cheapest) per facility
 
         if not our_rate and not comp_rates:
             continue
 
-        n_cheaper        = sum(1 for r in comp_rates if r < our_rate) if our_rate and comp_rates else None
-        mkt_min          = round(min(comp_rates), 2)                    if comp_rates else None
-        mkt_avg          = round(sum(comp_rates) / len(comp_rates), 2)  if comp_rates else None
-        mkt_median       = round(statistics.median(comp_rates), 2)      if comp_rates else None
-        mkt_max          = round(max(comp_rates), 2)                    if comp_rates else None
-        mkt_stdev        = round(statistics.stdev(comp_rates), 2)       if len(comp_rates) >= 2 else None
+        mkt_median  = round(statistics.median(comp_rates), 2)           if comp_rates else None
+        mkt_avg     = round(sum(comp_rates) / len(comp_rates), 2)       if comp_rates else None
+        mkt_stdev   = round(statistics.stdev(comp_rates), 2)            if len(comp_rates) >= 2 else None
+        mkt_med_psf = round(mkt_median / sf, 2)                         if mkt_median and sf else None
 
         rank_str         = None
         vs_median_dollar = None
@@ -379,7 +391,6 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
             if mkt_avg and mkt_stdev and mkt_stdev > 0:
                 z_score = round((our_rate - mkt_avg) / mkt_stdev, 2)
 
-            # Position label: based on % vs median (robust to outliers, intuitive)
             if vs_median_pct is not None:
                 apct = abs(vs_median_pct)
                 direction = "above" if vs_median_pct > 0 else "below"
@@ -395,9 +406,11 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
                     position_str = f"Significantly {direction} median ({vs_median_pct:+.1f}%)"
 
         vals = [
-            size, our_rate,
-            n_cheaper, mkt_min, mkt_avg, mkt_median, mkt_max,
-            rank_str, vs_median_dollar, vs_median_pct,
+            size, sf,
+            our_rate, our_per_sqft,
+            mkt_median, mkt_med_psf,
+            vs_median_dollar, vs_median_pct,
+            rank_str,
             mkt_stdev, z_score, position_str,
         ]
 
@@ -405,29 +418,27 @@ def write_our_position_sheet(wb, scraped, our_rates, market_name, today):
             c = ws.cell(row=row, column=col_idx, value=val)
             c.alignment = CENTER
 
-        # vs. Median columns (9, 10) and Rank (8): color based on vs. median sign
-        #   negative = we're cheaper = green, positive = we're more expensive = red
+        # vs. Median, Rank, Position: color by vs. median sign
         if vs_median_dollar is not None:
             med_fill = GREEN_FILL if vs_median_dollar <= 0 else RED_FILL
-            for col in (8, 9, 10, 13):  # Rank, vs. Median $, vs. Median %, Position
+            for col in (7, 8, 9, 12):
                 ws.cell(row=row, column=col).fill = med_fill
 
-        # Z-score column (12): colored independently — below mean = green, above = red
+        # Z-score: independent coloring
         if z_score is not None:
-            ws.cell(row=row, column=12).fill = GREEN_FILL if z_score <= 0 else RED_FILL
+            ws.cell(row=row, column=11).fill = GREEN_FILL if z_score <= 0 else RED_FILL
 
-        # Format % with explicit sign
         if vs_median_pct is not None:
-            ws.cell(row=row, column=10).value = f"{vs_median_pct:+.1f}%"
+            ws.cell(row=row, column=8).value = f"{vs_median_pct:+.1f}%"
 
         row += 1
 
     _autofit(ws)
     ws.column_dimensions["A"].width = 10
-    ws.column_dimensions["B"].width = 11
-    ws.column_dimensions["F"].width = 14
-    ws.column_dimensions["H"].width = 10
-    ws.column_dimensions["M"].width = 30
+    ws.column_dimensions["C"].width = 11
+    ws.column_dimensions["E"].width = 11
+    ws.column_dimensions["G"].width = 18
+    ws.column_dimensions["L"].width = 32
 
 
 # ── Sheet: Summary ────────────────────────────────────────────────────────────
@@ -457,7 +468,7 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
     ws["A2"].font = Font(italic=True, color="666666", size=9)
     ws.row_dimensions[2].height = 14
 
-    _header_row(ws, 3, ["Facility", "Distance (mi)"] + SUMMARY_SIZES, DARK_FILL, WHITE_FONT)
+    _header_row(ws, 3, ["Facility", "Distance (mi)", "Website"] + SUMMARY_SIZES, DARK_FILL, WHITE_FONT)
     ws.row_dimensions[3].height = 28
 
     # Sort: our property first, then competitors by distance
@@ -472,18 +483,25 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
 
         dist_raw  = s["facility"].get("distance")
         dist_num  = round(dist_raw, 4) if dist_raw and dist_raw < 9999 else None
+        url = s["facility"].get("url", "") or ""
         name_cell = ws.cell(row=row_idx, column=1, value=s["display_name"])
-        dist_cell = ws.cell(row=row_idx, column=2,
-                            value=0.0 if is_ours else dist_num)
+        dist_cell = ws.cell(row=row_idx, column=2, value=0.0 if is_ours else dist_num)
+        url_cell  = ws.cell(row=row_idx, column=3, value=url)
+        if url:
+            url_cell.hyperlink = url
+            url_cell.font = Font(color="FFFFFF" if is_ours else "0563C1", underline="single",
+                                 bold=is_ours)
 
         if is_ours:
-            for col in range(1, 3 + len(SUMMARY_SIZES)):
-                ws.cell(row=row_idx, column=col).fill = OUR_FILL
-                ws.cell(row=row_idx, column=col).font = WHITE_FONT
+            for col in range(1, 4 + len(SUMMARY_SIZES)):
+                c = ws.cell(row=row_idx, column=col)
+                c.fill = OUR_FILL
+                if col != 3:  # URL cell font already set above
+                    c.font = WHITE_FONT
         else:
             name_cell.font = BOLD_FONT
 
-        for col_idx, size in enumerate(SUMMARY_SIZES, 3):
+        for col_idx, size in enumerate(SUMMARY_SIZES, 4):
             norm = normalize_size(size)
             matching = [u for u in units
                         if u.get("size_norm") == norm and u.get("unit_type") != "Vehicle"]
@@ -501,9 +519,9 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
                 c.fill = OUR_FILL
                 c.font = WHITE_FONT
             elif price is not None:
-                our_rate = our_rates.get(norm)
-                if our_rate:
-                    c.fill = CHEAPER_FILL if price < our_rate else PRICIER_FILL
+                our_rt = our_rates.get(norm)
+                if our_rt:
+                    c.fill = CHEAPER_FILL if price < our_rt else PRICIER_FILL
 
     # Market median row
     last_data = data_start + len(ordered) - 1
@@ -513,7 +531,7 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
     med_label.fill = MEDIAN_FILL
 
     comp_rows = [data_start + i for i, s in enumerate(ordered) if not s["is_ours"]]
-    for col_idx in range(3, 3 + len(SUMMARY_SIZES)):
+    for col_idx in range(4, 4 + len(SUMMARY_SIZES)):
         col_letter = get_column_letter(col_idx)
         if comp_rows:
             addrs = ",".join(f"{col_letter}{r}" for r in comp_rows)
@@ -526,6 +544,7 @@ def write_summary_sheet(wb, scraped, our_rates, market_name, today):
         c.alignment = CENTER
 
     ws.cell(row=median_row, column=2).fill = MEDIAN_FILL
+    ws.cell(row=median_row, column=3).fill = MEDIAN_FILL
 
     _autofit(ws)
     ws.column_dimensions["A"].width = 34
@@ -646,7 +665,15 @@ def write_facility_sheet(wb, s, our_rates, today, used_names):
     )
     ws["A3"].font = Font(italic=True, color="666666", size=9)
 
-    info_row = 4
+    url = fac.get("url", "")
+    if url:
+        ws["A4"] = url
+        ws["A4"].hyperlink = url
+        ws["A4"].font = Font(color="0563C1", underline="single", size=9)
+        info_row = 5
+    else:
+        info_row = 4
+
     if s.get("admin_fee"):
         ws[f"A{info_row}"] = f"Admin Fee: ${s['admin_fee']:.0f}"
         ws[f"A{info_row}"].font = Font(italic=True, color="444444")
@@ -654,25 +681,29 @@ def write_facility_sheet(wb, s, our_rates, today, used_names):
 
     header_row = info_row + 1
     headers = [
-        "Size", "Unit Type", "Features",
-        "Web Rate", "In-Store Rate", "Promo", "Promo Months",
+        "Size", "Sqft", "Unit Type", "Features",
+        "Web Rate", "In-Store Rate", "$/sqft",
+        "Promo", "Promo Months",
         "Admin Fee", "Insurance/Mo", "Lock Fee", "Auto-Pay Disc.",
         "Eff. Move-In", "Eff. Yearly Rate",
     ]
     if not is_ours:
-        headers.append("vs. Our Rate")
+        headers += ["vs. Our Rate", "vs. Our $/sqft"]
 
     _header_row(ws, header_row, headers, ACCENT_FILL if not is_ours else DARK_FILL, WHITE_FONT)
     ws.row_dimensions[header_row].height = 22
 
     row = header_row + 1
     for u in s["units"]:
+        comp_rate = u.get("in_store_rate") or u.get("web_rate")
         vals = [
             u.get("size"),
+            u.get("sqft"),
             u.get("unit_type"),
             u.get("features"),
             u.get("web_rate"),
             u.get("in_store_rate"),
+            u.get("rate_per_sqft"),
             u.get("promo_description"),
             u.get("promo_months"),
             u.get("admin_fee"),
@@ -683,26 +714,28 @@ def write_facility_sheet(wb, s, our_rates, today, used_names):
             u.get("effective_yearly"),
         ]
 
-        vs_our = None
+        vs_our = vs_our_psf = None
         if not is_ours:
             norm = u.get("size_norm")
-            our_rate = our_rates.get(norm) if norm else None
-            comp_rate = u.get("in_store_rate") or u.get("web_rate")
-            if our_rate and comp_rate:
-                vs_our = round(comp_rate - our_rate, 2)
-            vals.append(vs_our)
+            sf   = u.get("sqft")
+            our_rt = our_rates.get(norm) if norm else None
+            if our_rt and comp_rate:
+                vs_our = round(comp_rate - our_rt, 2)
+                our_psf = round(our_rt / sf, 2) if sf else None
+                if our_psf and u.get("rate_per_sqft"):
+                    vs_our_psf = round(u["rate_per_sqft"] - our_psf, 2)
+            vals += [vs_our, vs_our_psf]
 
         for col_idx, val in enumerate(vals, 1):
             c = ws.cell(row=row, column=col_idx, value=val)
-            if col_idx in (4, 5, 12, 13):
+            if col_idx in (5, 6, 7, 14, 15):
                 c.alignment = CENTER
 
-        # Color the vs. Our Rate cell
         if not is_ours and vs_our is not None:
-            vs_col = len(vals)
-            c = ws.cell(row=row, column=vs_col)
-            c.fill = CHEAPER_FILL if vs_our < 0 else PRICIER_FILL
-            c.alignment = CENTER
+            fill = CHEAPER_FILL if vs_our < 0 else PRICIER_FILL
+            for col in range(len(vals) - 1, len(vals) + 1):
+                ws.cell(row=row, column=col).fill = fill
+                ws.cell(row=row, column=col).alignment = CENTER
 
         row += 1
 
